@@ -1,0 +1,357 @@
+---
+title: "Bayesian modeling and prediction for movies"
+author: "Dale Richardson"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output: 
+  html_document: 
+    toc: true
+    keep_md: true
+    fig_height: 4
+    highlight: pygments
+    theme: spacelab
+---
+
+## Setup
+
+### Load packages
+
+```{r load-packages, message = FALSE}
+suppressPackageStartupMessages(library(ggplot2))
+suppressPackageStartupMessages(library(plotly))
+suppressPackageStartupMessages(library(dplyr))
+suppressPackageStartupMessages(library(statsr))
+suppressPackageStartupMessages(library(BAS))
+suppressPackageStartupMessages(library(MASS))
+```
+
+### Load data
+
+```{r load-data}
+load("movies.Rdata")
+```
+
+
+
+* * *
+
+## Part 1: Data
+We have been provided a dataset of 651 **randomly sampled** movies produced and released prior to 2016. 
+This dataset contains 32 variables, some of which will not be useful for statistical modeling (i.e. `imdb_url`). We have not been provided any further details as to how the movies were exactly randomly selected, so there may be some unknown bias present in the dataset (unlikely, but possible). We will assume that our findings based on this dataset will be generalizable to the population of movies produced and released prior to 2016 in the United States.
+
+While the movies in this dataset have been selected randomly, it is **not possible to infer causality**. No random assignment into experimental/control groups was conducted regarding these movies. Therefore, we are unable to infer causality and instead can only highlight associations between variables.
+
+* * *
+
+## Part 2: Data manipulation
+
+Below, I will create the variables as requested in the project rubric by using the `mutate` function
+from `dplyr`. These variables are:
+
+- `feature_film` with levels yes and no, based on `title_type`
+- `drama` with levels yes and no, based on `genre`
+- `mpaa_rating_R` with levels yes and no, based on `mpaa_rating`
+- `oscar_season` with levels yes (if movie is released in November, October, or December) and no,
+based on `thtr_rel_month`
+- `summer_season` with levels yes (if movie is released in May, June, July, or August) and no, 
+based on `thtr_rel_month`
+
+```{r data-manipulation}
+
+# use dplyr mutate function to create feature_film variable
+movies <- movies %>% mutate(feature_film = ifelse(title_type == "Feature Film", "yes", "no") )
+# convert to factor
+movies$feature_film <- factor(movies$feature_film)
+
+# create drama variable
+movies <- movies %>% mutate(drama = ifelse(genre == "Drama", "yes", "no") )
+# convert to factor
+movies$drama <- factor(movies$drama)
+
+# create mpaa_rating_R variable
+movies <- movies %>% mutate(mpaa_rating_R = ifelse(mpaa_rating == "R", "yes", "no") )
+# convert to factor
+movies$mpaa_rating_R <- factor(movies$mpaa_rating_R)
+
+# create oscar_season variable
+movies <- movies %>% mutate(oscar_season = ifelse(thtr_rel_month %in% c(10,11,12), "yes", "no") )
+# convert to factor
+movies$oscar_season <- factor(movies$oscar_season)
+
+# create summer_season variable
+movies <- movies %>% mutate(summer_season = ifelse(thtr_rel_month %in% c(5:8), "yes", "no") )
+# convert to factor
+movies$summer_season <- factor(movies$summer_season)
+
+```
+
+
+* * *
+
+## Part 3: Exploratory data analysis
+
+Prior to exploring the data, I will first remove unnecessary variables from the dataframe, such as the `actor1-5` 
+variables and the `url` variables. The `actor` variables denote the main actors/actresses in the adbridged cast of the movie, while the `url` variables indicate the Rotten Tomatoes or IMDB links for the movies. It is unlikely that either of these variables will be useful in the linear model.
+
+### Data cleaning
+```{r cleaning}
+# drop useless variables
+movies.clean <- movies %>% dplyr::select(-starts_with("actor"), -contains("url") )
+# check that all is ok
+str(movies.clean)
+
+# which columns contain missing values, i.e. NA?
+colnames(movies.clean)[colSums(is.na(movies.clean)) > 0]
+
+```
+
+Looks like we are missing 1 `runtime`, 8 `studio` and 8 `dvd_rel_year`, `dvd_rel_month` and `dvd_rel_day` and 2 `director`
+observations. In principle, we could probably fill these data in by searching google but for the purposes of this assignment,
+I will leave them as NAs. However, I will check which runtime is missing and see if I can insert it as I will probably use
+this variable in my linear model.
+
+```{r imputation}
+# which movie is missing the runtime?
+movies.clean[which(is.na(movies$runtime)),]
+
+# checking google for "The End of America Documentary", we find that the running time is 71 minutes. I will add this value as I may use this variable in my linear model
+movies.clean$runtime[334] <- 71
+
+# check that all ok
+movies.clean[334,]
+
+```
+
+From the output above, we can see that the runtime for "The End of America Documentary" has been correctly inserted and we can proceed.
+
+### Exploring how `audience_score` relates to the new variables we created
+
+Given that we have created new categorical variables and we would like to see how the numerical variable, `audience_score`, relates to these categorical variables, boxplots are ideal. If one hovers over the boxplots below, you will see the corresponding 5-number summary values (Min, Q1, Median, Q3, Max) for each of the categorical variable's levels ("yes", "no"). This interactivity was achieved by using the `plotly` package, which you can find [here](https://plot.ly/r/). 
+
+#### Non-feature films have higher audience scores than feature films
+
+The plot below demonstrates a very strong relationship between `audience_score` and whether or not a movie is labeled as a feature film. Feature films have a lower median audience score (`62`) and a higher variance than non-feature films (median score `85.5`). The lower variance in the non-feature films could be due to a lower sample size (only 60 films) or because documentaries/non-feature films may adhere to higher standards. At this point, it is all speculative.
+
+```{r explore, fig.width = 5}
+# feature_film and audience_score
+g <- ggplot(movies.clean, aes(x = feature_film, y = audience_score)) + geom_boxplot() + 
+        labs(title = "Non-feature films have higher audience scores",
+             x = "Feature Film", y = "Audience Score") +
+        theme_bw()
+
+ggplotly(g)
+
+# how many non-feature films are there?
+sum(movies.clean$feature_film == "no")
+```
+
+#### Dramas have higher audience scores than other genres
+
+The plot below indicates that dramas (`70`) have slightly higher median audience scores than non-dramas (`61`). In contrast to the above plot, the variances are much more homoskedastic. 
+
+```{r explore-2, fig.width = 5}
+# drama and audience_score
+g <- ggplot(movies.clean, aes(x = drama, y = audience_score)) + geom_boxplot() + 
+        labs(title = "Dramas have higher audience scores",
+             x = "Drama", y = "Audience Score") +
+        theme_bw()
+
+ggplotly(g)
+
+```
+
+#### An MPAA R rating does not affect audience scores
+
+Audience scores are strikingly similar both at the median and variance levels when movies are split based on having an R rating or not. However, R-rated movies (`35`) have a slightly larger interquartile range than non-R-rated movies (`31.75`). 
+
+```{r explore-3, fig.width = 5}
+# mpaa_rating_R and audience_score
+g <- ggplot(movies.clean, aes(x = mpaa_rating_R, y = audience_score)) + geom_boxplot() + 
+        labs(title = "Audience scores do not differ by MPAA rating",
+             x = "MPAA Rated R", y = "Audience Score") +
+        theme_bw()
+
+ggplotly(g)
+
+# check IQR
+by(movies.clean$audience_score,  movies.clean$mpaa_rating_R, IQR)
+
+```
+
+#### Movies released during oscar season have slightly higher audience scores
+
+For an undetermined reason, movies released during oscar season (October, November and December) have slighly higher median audience scores (`69`) than movies released during other months (`64`). The variances are very similar across categories.
+
+```{r explore-4, fig.width = 5}
+# oscar_season and audience_score
+g <- ggplot(movies.clean, aes(x = oscar_season, y = audience_score)) + geom_boxplot() + 
+        labs(title = "Movies released in oscar season have slightly higher scores",
+             x = "Oscar Season", y = "Audience Score") +
+        theme_bw()
+
+ggplotly(g)
+```
+
+#### Audience scores do not differ by summer season
+
+Whether or not a movie was released during the summer season had neglible bearing on median audience scores. Variances are also very similar across categories.
+
+```{r explore-5, fig.width = 5}
+# summer_season and audience_score
+g <- ggplot(movies.clean, aes(x = summer_season, y = audience_score)) + geom_boxplot() + 
+        labs(title = "Audience score does not differ by summer season",
+             x = "Summer Season", y = "Audience Score") +
+        theme_bw()
+
+ggplotly(g)
+```
+
+
+* * *
+
+## Part 4: Modeling
+
+Here, I will develop the Bayesian regression model to predict `audience_score` from the following explanatory variables (as indicated in the project rubric):
+
+- `feature_film`
+- `drama`
+- `runtime`
+- `mpaa_rating_R`
+- `thtr_rel_year`
+- `oscar_season`
+- `summer_season`
+- `imdb_rating`
+- `imdb_num_votes`
+- `critics_score`
+- `best_pic_nom`
+- `best_pic_win`
+- `best_actor_win`
+- `best_actress_win`
+- `best_dir_win`
+- `top200_box`
+
+### Create the model
+
+As a preliminary step, I will first remove any `NA` values and then subset the data to include only the predictor variables above and the audience score.
+
+```{r bma}
+# first complete cases and create a reduced data set with only variables of interest
+movies.clean.reduced <- movies.clean %>% dplyr::select(audience_score, feature_film, drama, runtime, mpaa_rating_R,
+                                                thtr_rel_year, oscar_season, summer_season, imdb_rating,
+                                                imdb_num_votes, critics_score, best_pic_nom, best_pic_win,
+                                                best_actor_win, best_actress_win, best_dir_win, top200_box)
+
+# generate the model
+bma_movies <- bas.lm(audience_score ~ . -audience_score, data = movies.clean.reduced,
+                     prior = "BIC",
+                     modelprior = uniform())
+
+bma_movies
+
+summary(bma_movies)
+```
+We can see from the output that the top 5 high scoring models include at most 3 predictors (other than the intercept). Furthermore, the top two models have the highest posterior probabilities (`0.1406` and `0.12`, which are roughly four times greater than the remaining three models. 
+
+### Model selection
+
+As we have done in the lab exercise, we will find predictive values under the different model types (`BPM`, `MPM`, `HPM`). We will first look at the Best Predictive Model.
+
+```{r bma_predict, cache=TRUE}
+#check best predictive model
+BPM_pred_audscore <- predict(bma_movies, estimator="BPM", se.fit=TRUE)
+bma_movies$namesx[BPM_pred_audscore$bestmodel+1]
+```
+
+The best predictive model includes three predictors and the intercept. From the credible interval output below and focusing our attention only on the `BPM` coefficients: `imdb_rating`, `critics_score` and `best_pic_winyes`, we see that the `y-intercept` anchors the data at ~`62.3` and for each unit increase in `imdb_rating` there is a `14.9` point increase in `audience_score`. Likewise, for each unit increase in `critics_score`, there is a `0.06` increase in `audience_score`. Lastly, for each unit increase in `best_pic_winyes`, there is a decrease of `0.01` in `audience_score`. However, it should be noted that the 95% credible intervals for `critics_score` and `best_pic_winyes` include the value of 0. 
+
+```{r confint}
+# check credible intervals of coefficients
+coef_bma_movies <- coef.bas(bma_movies)
+confint(coef_bma_movies)
+```
+
+Let us now look at the Highest Probability Model (`HPM`) and Median Probability Model (`MPM`).
+
+```{r bma_predict2, cache=TRUE}
+#check HPM
+HPM_pred_audscore <- predict(bma_movies, estimator="HPM", se.fit=TRUE)
+bma_movies$namesx[HPM_pred_audscore$bestmodel+1]
+```
+
+```{r bma_predict3, cache=TRUE}
+#check MPM
+MPM_pred_audscore <- predict(bma_movies, estimator="MPM", se.fit=TRUE)
+bma_movies$namesx[MPM_pred_audscore$bestmodel+1]
+```
+
+Interestingly, both the `HPM` and `MPM` include the same two predictors and the intercept. As the median probability model includes all predictors with a marginal inclusion probability greater than `0.5`, and if these predictors are uncorrelated, then the `MPM` is the exact same as the `HPM`. 
+
+Given that only two of the predictors have a marginal inclusion probability greater than `0.5` (also see below in Model diagnostics), I will opt to use the `HPM` to predict `audience_score` of my chosen movie. However, before going into the prediction, it is important to look at some model diagnostics.
+
+### Model diagnostics
+
+#### Residuals show non-constant variance and some structure
+Based on the residuals versus predicted/fitted values plot below, there appears to be evidence for deviation from a purely linear relationship between the predictor variables and the response variable. Residuals appear to have some non-constant variance for predicted values less than 60 and greater than 80. We should exercise caution when using these models for predictions. I am not completely sure, but this curved pattern in the residuals may arise from collinearity in the predictors `imdb_rating` and `critics_score`. 
+
+```{r residuals}
+# residuals vs fitted
+plot(bma_movies, which = 1)
+```
+
+#### Only two predictors have a marginal posterior inclusion probability greater than 0.5
+
+Based on the image plot below and the plot of marginal posterior inclusion probabilities (pip) for each of the covariates, we observe that all models include the `imdb_rating` and `~90%` of models include `critics_score`. The next highest covariate is runtime, which is included `43%` of the time. As mentioned above, the `HPM` consists of the above two variables and the intercept and will be used for prediction below.
+
+```{r image, fig.height = 6}
+# image plot
+image(bma_movies, rotate = F)
+plot(bma_movies, which = 4, ask = FALSE, caption = "", sub.caption = "")
+title(main = "Posterior inclusion probabilities")
+```
+
+
+* * *
+
+## Part 5: Prediction
+
+![The Man Who Knew Infinity](theman.jpg)
+
+The movie I have chosen is one that I have seen recently and really enjoyed. It is called, [*The Man Who Knew Infinity*](https://www.youtube.com/watch?v=NP0lUqNAw3k) starring Dev Patel and Jeremy Irons. It is about a self-taught, brilliant Indian mathematician named Ramanujan and his friendship with his mentor, Professor G.H Hardy. I retrieved the movie data from its [Rotten Tomatoes](https://www.rottentomatoes.com/m/the_man_who_knew_infinity/) page. Its [IMDB](http://www.imdb.com/title/tt0787524/?ref_=fn_al_tt_1) rating as of `r format(Sys.Date(), "%B %d, %Y")` is `7.2` and has a Rotten Tomatoes audience score of `71`.
+
+As mentioned above, I have chosen to use the highest probability model (`HPM`) to make my predictions of `audience_score` for *The Man who Knew Infinity*.  
+
+```{r prediction, cache=TRUE}
+# check to make sure my movie choice does not exist in the dataframe
+grep("Infinity", movies.clean$title, ignore.case = TRUE)
+
+
+# all ok, my movie is not in the movies.data; create the new dataframe that I'll use for predictions 
+the.man.who.knew.infinity.2016 <- data.frame(feature_film = "yes", drama = "yes", genre = "drama", runtime = 108,
+                                             mpaa_rating_R = "no", thtr_rel_year = 2016, oscar_season = "no", summer_season = "no", imdb_rating = 7.2, imdb_num_votes = 27398, critics_score = 61, best_pic_nom = "no",
+                                             best_pic_win = "no", best_actor_win = "no", best_actress_win = "no",
+                                             best_dir_win = "no", top200_box = "no"
+                                             )
+
+
+# run the prediction and include the confidence interval in the output
+BPM_pred_audience_score <- predict(bma_movies, newdata = the.man.who.knew.infinity.2016, estimator = "HPM",
+                                   se.fit = TRUE, prediction = TRUE)
+
+# confint
+confint(BPM_pred_audience_score)
+
+```
+
+As observed above, our `HPM` model has predicted an `audience_score` of approximately `73` for *The Man Who Knew Infinity*. The actual `audience_score` is `71`. Not bad! 
+
+
+* * *
+
+## Part 6: Conclusion
+
+Here, I have worked with a dataset of `651` randomly sampled movies produced and released prior to 2016, which constitutes an observational study. Using this dataset, I have created several new variables to be used in a Bayesian multiple linear regression model to predict the [Rotten Tomatoes](http://www.rottentomatoes.com) audience score for a film of my chosing that was not part of the initial dataset. 
+
+I elected to use the Highest Probability Model (out of all possible enumerated models $2^{16}$) to predict audience score of the 2016 film, *The Man Who Knew Infinity*, as it included only two high-confidence predictors, `imdb_rating` and `critics_score`. I considered this model to be the most parsimonious choice for prediction. 
+
+While the model resulted in a predicted score of `73`, which is very close to the actual audience score of `71`, it is important to note that model diagnostics revealed some potential red flags. In a residuals plot, I observed some non-constant variance for observations at the low and high ends of predicted scores, in combination with some slight curvature in the residuals. Inclusion of a larger sample of movies or perhaps transformations of certain variables may help to address this bias. 
+
+Lastly, future work could explore a comparison of different model choices for prediction in addition to exploring various parameter choices for priors.
